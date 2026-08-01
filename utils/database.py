@@ -341,29 +341,64 @@ def save_uploaded_file_record(
     page_count: int = 0,
     parsed_json: Optional[str] = None,
 ) -> int:
-    """儲存上傳檔案紀錄，回傳 record_id"""
+    """儲存上傳檔案紀錄（同名檔案會覆蓋舊紀錄，只保留最新）
+
+    Args:
+        user_id: 使用者 ID
+        file_name: 檔案名稱
+        file_type: 檔案類型（pdf/docx/doc）
+        kid_id: 關聯的 Kid ID
+        page_count: 頁數
+        parsed_json: 解析後的 JSON 內容
+
+    Returns:
+        int: 紀錄 ID
+    """
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO uploaded_files (user_id, kid_id, file_name, file_type, page_count, parsed_json) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, kid_id, file_name, file_type, page_count, parsed_json),
-    )
-    conn.commit()
-    record_id = cursor.lastrowid
+
+    # 檢查是否已有同名檔案
+    existing = cursor.execute(
+        "SELECT id FROM uploaded_files WHERE user_id = ? AND file_name = ?",
+        (user_id, file_name),
+    ).fetchone()
+
+    if existing:
+        # 覆蓋舊紀錄
+        cursor.execute(
+            """
+            UPDATE uploaded_files
+            SET kid_id = ?, file_type = ?, page_count = ?, parsed_json = ?,
+                created_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (kid_id, file_type, page_count, parsed_json, existing["id"]),
+        )
+        conn.commit()
+        record_id = existing["id"]
+    else:
+        # 新增紀錄
+        cursor.execute(
+            "INSERT INTO uploaded_files (user_id, kid_id, file_name, file_type, page_count, parsed_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, kid_id, file_name, file_type, page_count, parsed_json),
+        )
+        conn.commit()
+        record_id = cursor.lastrowid
+
     conn.close()
     return record_id
 
 
-def get_uploaded_files_by_user(user_id: int) -> list[sqlite3.Row]:
-    """取得使用者的上傳紀錄"""
+def get_uploaded_files_by_user(user_id: int) -> list[dict]:
+    """取得使用者的上傳紀錄，回傳 dict 列表以支援 .get() 操作"""
     conn = get_connection()
     rows = conn.execute(
         "SELECT * FROM uploaded_files WHERE user_id = ? ORDER BY created_at DESC",
         (user_id,),
     ).fetchall()
     conn.close()
-    return rows
+    return [dict(row) for row in rows]
 
 
 # ── 使用紀錄 ──────────────────────────────────────────────

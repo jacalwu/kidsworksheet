@@ -557,7 +557,7 @@ def render_upload_page(user: dict) -> None:
             st.markdown(f"**📑 頁數**：{page_count}")
 
         # 解析按鈕
-        if st.button("🔍 解析檔案內容", use_container_width=True, key="btn_parse"):
+        if st.button("🔍 預覽檔案資料", use_container_width=True, key="btn_parse"):
             with st.spinner("正在解析檔案內容..."):
                 parsed = parse_file(
                     uploaded_file.getvalue(),
@@ -691,20 +691,74 @@ def render_generate_page(user: dict, config: dict) -> None:
 
         source_option = st.radio(
             "選擇資料來源",
-            options=["latest", "paste"],
-            format_func=lambda x: "🆕 使用最近解析的檔案" if x == "latest" else "📋 直接貼上文字內容",
+            options=["files", "latest", "paste"],
+            format_func=lambda x: {
+                "files": "📚 從上傳紀錄選擇（可多選）",
+                "latest": "🆕 使用最近解析的檔案",
+                "paste": "📋 直接貼上文字內容",
+            }.get(x, x),
             key="source_option",
         )
 
         content_text = ""
+        selected_files_info = []  # 記錄選中檔案資訊，供 record_usage 使用
 
-        if source_option == "latest":
+        if source_option == "files":
+            if uploads:
+                # 多選檔案
+                file_options = {}
+                for u in uploads:
+                    label = f"📄 {u['file_name']}（{u['file_type']}｜{u['page_count']}頁｜{u['created_at'][:19] if u['created_at'] else 'N/A'}）"
+                    file_options[label] = u
+
+                selected_labels = st.multiselect(
+                    "選擇要使用的檔案（可多選）",
+                    options=list(file_options.keys()),
+                    key="multi_file_select",
+                    help="選中的檔案內容將會合併後一起生成題目",
+                )
+
+                if selected_labels:
+                    merged_parts = []
+                    for label in selected_labels:
+                        u = file_options[label]
+                        selected_files_info.append(u)
+                        # 從 DB 讀取解析內容
+                        parsed_json_str = u.get("parsed_json") or "{}"
+                        try:
+                            import json as json_lib
+                            parsed_data = json_lib.loads(parsed_json_str)
+                            file_content = format_parsed_content(parsed_data)
+                        except Exception:
+                            file_content = parsed_json_str
+
+                        merged_parts.append(
+                            f"### 檔案：{u['file_name']}\n\n{file_content}"
+                        )
+
+                    content_text = "\n\n---\n\n".join(merged_parts)
+                    st.success(f"✅ 已載入 {len(selected_labels)} 個檔案（合計 {len(content_text)} 字元）")
+
+                    with st.expander("📝 合併內容預覽"):
+                        preview = content_text[:2000]
+                        if len(content_text) > 2000:
+                            preview += f"\n\n...（共 {len(content_text)} 字元，僅顯示前 2000 字元）"
+                        st.text(preview)
+                else:
+                    st.info("請從上方列表中選擇至少一個檔案。")
+            else:
+                st.warning("尚無上傳紀錄，請先前往「📤 上傳資料」頁面上傳並解析檔案。")
+                if st.button("前往上傳頁面"):
+                    st.session_state["current_page"] = "upload"
+                    st.rerun()
+
+        elif source_option == "latest":
             if has_parsed_in_session:
                 parsed = st.session_state["last_parsed"]
                 file_name = st.session_state.get("last_parsed_file_name", "未知")
                 content_text = format_parsed_content(parsed)
                 st.success(f"✅ 已載入：{file_name}（{len(content_text)} 字元）")
-                with st.expander("預覽內容"):
+                with st.expander("📝 預覽內容"):
                     st.text(content_text[:1500] + ("..." if len(content_text) > 1500 else ""))
             else:
                 st.warning("尚未解析任何檔案，請先前往「📤 上傳資料」頁面上傳並解析檔案。")
@@ -718,6 +772,18 @@ def render_generate_page(user: dict, config: dict) -> None:
                 placeholder="在此貼上要生成題目的文字內容...",
                 key="pasted_content",
             )
+
+    st.markdown("---")
+
+    # ── 使用者自訂 Prompt 微調 ────────────────────────────
+    st.markdown("### ✏️ 微調選項（選填）")
+    user_prompt_hint = st.text_area(
+        "自訂生成提示",
+        height=80,
+        placeholder="例如：題目要簡單一點、多出選擇題、加入生活化的例子、重點放在第三章...",
+        help="在此輸入對題目生成的額外要求。輸入內容會經過安全過濾以防注入攻擊。",
+        key="user_prompt_hint",
+    )
 
     st.markdown("---")
 
@@ -759,6 +825,7 @@ def render_generate_page(user: dict, config: dict) -> None:
                 generate_type,
                 use_search=use_search,
                 config=config,
+                user_prompt_hint=user_prompt_hint,
             )
 
             progress_bar.progress(70, "正在建立下載檔案...")
@@ -770,11 +837,18 @@ def render_generate_page(user: dict, config: dict) -> None:
             )
 
             # 記錄使用
+            # 合併選中檔案名稱作為記錄
+            if selected_files_info:
+                record_file_name = " + ".join(
+                    u["file_name"] for u in selected_files_info
+                )
+            else:
+                record_file_name = st.session_state.get("last_parsed_file_name", "")
             record_usage(
                 user["id"],
                 generate_type,
                 kid_id=selected_kid["id"],
-                file_name=st.session_state.get("last_parsed_file_name", ""),
+                file_name=record_file_name,
             )
 
             progress_bar.progress(100, "完成！")
