@@ -86,9 +86,32 @@ def logout_user() -> None:
 
 
 def get_current_user() -> Optional[dict]:
-    """取得目前登入的使用者"""
+    """取得目前登入的使用者
+
+    優先順序：
+    1. session_state（自訂 OAuth / 本地登入）
+    2. Streamlit 內建 authentication（st.user）
+    """
+    # 先檢查 session_state
     if st.session_state.get("logged_in"):
         return st.session_state.get("user")
+
+    # 再檢查 Streamlit 內建 authentication
+    try:
+        if hasattr(st, 'user') and st.user.is_logged_in:
+            return {
+                "username": st.user.email.split('@')[0] if st.user.email else st.user.name,
+                "email": st.user.email,
+                "name": st.user.name,
+                "picture": getattr(st.user, "picture", ""),
+                "oauth_provider": "streamlit_native",
+                "oauth_id": st.user.email if st.user.email else st.user.id,
+                "credits": st.session_state.get("user", {}).get("credits", 100),
+                "is_admin": st.session_state.get("is_admin", False),
+            }
+    except Exception:
+        pass
+
     return None
 
 
@@ -105,8 +128,6 @@ def require_login() -> Optional[dict]:
 
 def render_login_form() -> None:
     """繪製登入表單"""
-    st.markdown("## 🔐 登入")
-
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("使用者名稱", key="login_username")
         password = st.text_input("密碼", type="password", key="login_password")
@@ -128,8 +149,6 @@ def render_login_form() -> None:
 
 def render_register_form() -> None:
     """繪製註冊表單"""
-    st.markdown("## 📝 註冊新帳號")
-
     with st.form("register_form", clear_on_submit=False):
         username = st.text_input("使用者名稱", key="reg_username")
         email = st.text_input("電子郵件（選填）", key="reg_email")
@@ -210,7 +229,7 @@ PROVIDER_CONFIG_KEYS = {
         "db_prefix": "OAUTH_GOOGLE",
         "secrets_client_id": "GOOGLE_CLIENT_ID",
         "secrets_client_secret": "GOOGLE_CLIENT_SECRET",
-        "default_redirect_uri": "https://kidsworksheet-tccp.streamlit.app/oauth_callback",
+        "default_redirect_uri": "http://localhost:8501/oauth_callback",
         "has_json_file": True,  # Google 可從 client_secret_*.json 讀取
     },
     "facebook": {
@@ -282,7 +301,10 @@ def _load_google_oauth_config() -> dict:
         "enabled": True,
         "client_id": "",
         "client_secret": "",
-        "redirect_uris": ["http://localhost:8501/oauth_callback"],
+        "redirect_uris": [
+            "http://localhost:8501/oauth_callback",
+            "https://kidsworksheet-tccp.streamlit.app/oauth_callback"
+        ],
         "source": "⭐ 未設定",
     }
 
@@ -334,8 +356,18 @@ def _load_google_oauth_config() -> dict:
 
     # 2. 嘗試從 Streamlit secrets 讀取
     try:
+        # 優先嘗試新的 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET 格式
         cid = st.secrets.get("GOOGLE_CLIENT_ID", "")
         csec = st.secrets.get("GOOGLE_CLIENT_SECRET", "")
+
+        # 若沒有，嘗試從 [auth] 區塊讀取（相容 Streamlit 內建 OAuth 格式）
+        if not cid:
+            auth_config = st.secrets.get("auth", {})
+            cid = auth_config.get("client_id", "")
+        if not csec:
+            auth_config = st.secrets.get("auth", {})
+            csec = auth_config.get("client_secret", "")
+
         if cid and csec:
             result["client_id"] = cid
             result["client_secret"] = csec
@@ -507,13 +539,21 @@ def _get_redirect_uri(allowed_uris: list[str]) -> str:
 # ── OAuth 輔助函式 ────────────────────────────────────────
 
 def build_oauth_url(provider: str, client_id: str, redirect_uri: str) -> str:
-    """建立 OAuth 授權 URL"""
+    """建立 OAuth 授權 URL
+
+    同時將 provider、state、redirect_uri 存入 session state，
+    以便 callback 時能正確辨識 provider 並使用一致的 redirect_uri。
+    """
     config = OAUTH_PROVIDERS.get(provider)
     if not config:
         return ""
 
     state = secrets_lib.token_urlsafe(32)
+
+    # 存入 session state 供 callback 使用
     st.session_state["oauth_state"] = state
+    st.session_state["oauth_provider"] = provider
+    st.session_state["oauth_redirect_uri"] = redirect_uri
 
     params = {
         "client_id": client_id,
@@ -535,7 +575,8 @@ def build_oauth_url(provider: str, client_id: str, redirect_uri: str) -> str:
 def _render_inline_oauth_buttons() -> None:
     """在登入頁面中直接繪製 OAuth 登入按鈕（無標題、無分隔線）
 
-    用於登入 tab 頂部醒目位置，讓使用者可以直接使用第三方帳號登入。
+    用於登入頁面右側的「快速登入」區塊。
+    顯示 Google、Facebook 等第三方登入按鈕。
     """
     provider_styles = {
         "google": {
@@ -583,13 +624,17 @@ def _render_inline_oauth_buttons() -> None:
                 <a href="{oauth_url}" target="_self">
                     <button style="
                         background-color: {style['bg_color']}; color: white; border: none;
-                        padding: 14px 28px; border-radius: 8px; cursor: pointer;
-                        font-size: 17px; width: 100%; margin: 6px 0;
+                        padding: 16px 32px; border-radius: 10px; cursor: pointer;
+                        font-size: 18px; width: 100%; margin: 10px 0;
                         font-family: 'Google Sans', Roboto, sans-serif;
-                        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
-                        transition: transform 0.1s ease;">
-                        <span style="font-size: 22px; margin-right: 10px; font-weight: bold;">{style['icon']}</span>
-                        {style['button_text']}
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                        transition: transform 0.1s ease;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        gap: 12px;">
+                        <span style="font-size: 24px; font-weight: bold;">{style['icon']}</span>
+                        <span>{style['button_text']}</span>
                     </button>
                 </a>
                 """,
@@ -682,7 +727,10 @@ def render_oauth_section() -> None:
 
 def handle_oauth_callback() -> Optional[dict]:
     """處理 OAuth 回呼：從 URL query params 取得 authorization code，
+    根據 session 中記錄的 provider 自動選擇對應的設定，
     交換 access token，取得使用者資訊，建立或登入帳號。
+
+    支援 Google、Facebook、WeChat 三種 provider。
 
     Returns:
         Optional[dict]: 登入成功時回傳使用者 dict，否則回傳 None
@@ -694,29 +742,47 @@ def handle_oauth_callback() -> Optional[dict]:
     if not code:
         return None
 
-    # 驗證 state（防止 CSRF）
+    # ── 取得 session 中記錄的 provider 資訊 ─────────────
+    provider = st.session_state.get("oauth_provider", "google")
     saved_state = st.session_state.get("oauth_state")
+    saved_redirect_uri = st.session_state.get("oauth_redirect_uri")
+
+    # 驗證 state（防止 CSRF）
     if saved_state and state != saved_state:
         st.error("⚠️ OAuth 安全驗證失敗（state 不符），請重新登入。")
         st.query_params.clear()
         return None
 
-    # 嘗試處理 Google OAuth
-    google_config = _load_google_oauth_config()
-    if not google_config["client_id"] or not google_config["client_secret"]:
-        st.info("🔧 OAuth 回呼已收到，但 Google OAuth 尚未設定。")
+    # ── 根據 provider 載入對應設定 ───────────────────────
+    provider_loaders = {
+        "google": _load_google_oauth_config,
+        "facebook": _load_facebook_oauth_config,
+        "wechat": _load_wechat_oauth_config,
+    }
+    loader = provider_loaders.get(provider, _load_google_oauth_config)
+    oauth_config = loader()
+
+    provider_name = OAUTH_PROVIDERS.get(provider, {}).get("name", provider.title())
+
+    if not oauth_config["client_id"] or not oauth_config["client_secret"]:
+        st.info(f"🔧 OAuth 回呼已收到，但 {provider_name} OAuth 尚未設定。")
         st.query_params.clear()
         return None
 
-    redirect_uri = _get_redirect_uri(google_config["redirect_uris"])
+    # 使用與授權時相同的 redirect_uri（確保與 Google 要求的完全一致）
+    if saved_redirect_uri:
+        redirect_uri = saved_redirect_uri
+    else:
+        redirect_uri = _get_redirect_uri(oauth_config["redirect_uris"])
 
     try:
-        # 交換 authorization code 為 access token
+        # ── 交換 authorization code 為 access token ─────
         token_response = _exchange_code_for_token(
-            code,
-            google_config["client_id"],
-            google_config["client_secret"],
-            redirect_uri,
+            code=code,
+            client_id=oauth_config["client_id"],
+            client_secret=oauth_config["client_secret"],
+            redirect_uri=redirect_uri,
+            provider=provider,
         )
 
         if not token_response:
@@ -730,21 +796,25 @@ def handle_oauth_callback() -> Optional[dict]:
             st.query_params.clear()
             return None
 
-        # 使用 access token 取得使用者資訊
-        user_info = _fetch_google_userinfo(access_token)
+        # ── 使用 access token 取得使用者資訊 ────────────
+        user_info = _fetch_oauth_userinfo(access_token, provider)
         if not user_info:
             st.error("❌ 無法取得使用者資訊。")
             st.query_params.clear()
             return None
 
-        google_id = user_info.get("sub", "")
-        email = user_info.get("email", "")
-        name = user_info.get("name", email.split("@")[0] if email else "google_user")
+        # ── 根據不同 provider 解析使用者資訊 ─────────────
+        user_id, email, name = _parse_oauth_userinfo(user_info, provider)
 
-        # 查找或建立使用者帳號
+        if not user_id:
+            st.error("❌ 無法取得使用者 ID。")
+            st.query_params.clear()
+            return None
+
+        # ── 查找或建立使用者帳號 ─────────────────────────
         user = _find_or_create_oauth_user(
-            oauth_provider="google",
-            oauth_id=google_id,
+            oauth_provider=provider,
+            oauth_id=user_id,
             username=name,
             email=email,
         )
@@ -752,6 +822,10 @@ def handle_oauth_callback() -> Optional[dict]:
         if user:
             login_user(user)
             st.query_params.clear()
+            # 清除 OAuth session 暫存
+            st.session_state.pop("oauth_state", None)
+            st.session_state.pop("oauth_provider", None)
+            st.session_state.pop("oauth_redirect_uri", None)
             st.success(f"歡迎，{name}！")
             st.rerun()
             return user
@@ -767,15 +841,20 @@ def handle_oauth_callback() -> Optional[dict]:
 
 
 def _exchange_code_for_token(
-    code: str, client_id: str, client_secret: str, redirect_uri: str
+    code: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    provider: str = "google",
 ) -> Optional[dict]:
-    """使用 authorization code 向 Google 交換 access token
+    """使用 authorization code 向 OAuth provider 交換 access token
 
     Args:
-        code: Google 回傳的 authorization code
-        client_id: Google OAuth client ID
-        client_secret: Google OAuth client secret
+        code: OAuth provider 回傳的 authorization code
+        client_id: Client ID
+        client_secret: Client Secret
         redirect_uri: 必須與授權時使用的 redirect URI 完全一致
+        provider: "google" / "facebook" / "wechat"
 
     Returns:
         Optional[dict]: token 回應 JSON，失敗時回傳 None
@@ -786,7 +865,8 @@ def _exchange_code_for_token(
         st.error("請安裝 requests 套件：pip install requests")
         return None
 
-    token_url = OAUTH_PROVIDERS["google"]["token_url"]
+    provider_config = OAUTH_PROVIDERS.get(provider, OAUTH_PROVIDERS["google"])
+    token_url = provider_config["token_url"]
 
     payload = {
         "code": code,
@@ -808,11 +888,12 @@ def _exchange_code_for_token(
         return None
 
 
-def _fetch_google_userinfo(access_token: str) -> Optional[dict]:
-    """使用 access token 從 Google 取得使用者資訊
+def _fetch_oauth_userinfo(access_token: str, provider: str = "google") -> Optional[dict]:
+    """使用 access token 從 OAuth provider 取得使用者資訊
 
     Args:
-        access_token: Google OAuth access token
+        access_token: OAuth access token
+        provider: "google" / "facebook" / "wechat"
 
     Returns:
         Optional[dict]: 使用者資訊 JSON，失敗時回傳 None
@@ -822,7 +903,8 @@ def _fetch_google_userinfo(access_token: str) -> Optional[dict]:
     except ImportError:
         return None
 
-    userinfo_url = OAUTH_PROVIDERS["google"]["userinfo_url"]
+    provider_config = OAUTH_PROVIDERS.get(provider, OAUTH_PROVIDERS["google"])
+    userinfo_url = provider_config["userinfo_url"]
     headers = {"Authorization": f"Bearer {access_token}"}
 
     try:
@@ -833,6 +915,37 @@ def _fetch_google_userinfo(access_token: str) -> Optional[dict]:
             return None
     except requests.RequestException:
         return None
+
+
+def _parse_oauth_userinfo(user_info: dict, provider: str) -> tuple[str, str, str]:
+    """根據不同 provider 解析使用者資訊
+
+    Args:
+        user_info: 從 provider 取得的 userinfo JSON
+        provider: "google" / "facebook" / "wechat"
+
+    Returns:
+        tuple[str, str, str]: (user_id, email, display_name)
+    """
+    if provider == "google":
+        user_id = user_info.get("sub", "")
+        email = user_info.get("email", "")
+        name = user_info.get("name", email.split("@")[0] if email else "google_user")
+    elif provider == "facebook":
+        user_id = user_info.get("id", "")
+        email = user_info.get("email", "")
+        name = user_info.get("name", email.split("@")[0] if email else "fb_user")
+    elif provider == "wechat":
+        # 微信的 userinfo 使用 unionid 或 openid
+        user_id = user_info.get("unionid") or user_info.get("openid", "")
+        email = user_info.get("email", "")
+        name = user_info.get("nickname", "wechat_user")
+    else:
+        user_id = user_info.get("sub", user_info.get("id", ""))
+        email = user_info.get("email", "")
+        name = user_info.get("name", user_info.get("nickname", f"{provider}_user"))
+
+    return user_id, email, name
 
 
 def _find_or_create_oauth_user(
