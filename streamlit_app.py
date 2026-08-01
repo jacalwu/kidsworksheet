@@ -15,6 +15,7 @@ import os
 import json
 import streamlit as st
 from datetime import datetime, timezone
+from typing import Optional
 
 # ── 頁面設定（必須在第一個 st 指令之前） ──────────────────
 st.set_page_config(
@@ -41,6 +42,8 @@ from utils.database import (
     get_uploaded_files_by_user,
     record_usage,
     get_usage_records_by_user,
+    get_connection,
+    hash_password,
 )
 from utils.auth import (
     init_session_state,
@@ -151,6 +154,126 @@ def apply_custom_css() -> None:
     )
 
 
+# ── Streamlit Authentication (1.42+) ────────────────────────
+def check_streamlit_auth() -> bool:
+    """檢查是否使用 Streamlit 內建 authentication
+
+    Returns:
+        bool: 是否啟用 Streamlit 內建 authentication
+    """
+    try:
+        # 檢查是否有設定 auth secrets
+        has_auth_secrets = (
+            st.secrets.get("auth", {}).get("client_id") or
+            st.secrets.get("GOOGLE_CLIENT_ID") or
+            st.secrets.get("auth", {}).get("cookie_secret")
+        )
+        return bool(has_auth_secrets)
+    except Exception:
+        return False
+
+
+def get_streamlit_user() -> Optional[dict]:
+    """從 Streamlit 內建 authentication 取得使用者資訊
+
+    Returns:
+        Optional[dict]: 使用者資訊，若未登入則回傳 None
+    """
+    try:
+        # Streamlit 1.42+ API
+        if hasattr(st, 'user') and st.user.is_logged_in:
+            return {
+                "username": st.user.email.split('@')[0] if st.user.email else st.user.name,
+                "email": st.user.email,
+                "name": st.user.name,
+                "picture": getattr(st.user, "picture", ""),
+                "oauth_provider": "streamlit_native",
+                "oauth_id": st.user.email if st.user.email else st.user.id,
+                "credits": 100,  # 預設配額
+                "is_admin": False,
+            }
+    except Exception:
+        pass
+    return None
+
+
+def sync_streamlit_user_to_db(user_info: dict) -> Optional[dict]:
+    """將 Streamlit OAuth 使用者同步到資料庫
+
+    Args:
+        user_info: 從 Streamlit st.user 取得的使用者資訊
+
+    Returns:
+        Optional[dict]: 資料庫中的使用者資料
+    """
+    conn = get_connection()
+
+    # 先用 OAuth 查找現有使用者
+    row = conn.execute(
+        "SELECT * FROM users WHERE oauth_provider = ? AND oauth_id = ?",
+        ("streamlit_native", user_info["oauth_id"])
+    ).fetchone()
+
+    if row:
+        conn.close()
+        return dict(row)
+
+    # 若不存在，檢查是否有相同 email 或 username 的使用者
+    # 若有相同 email，可能是之前用其他方式登入的使用者
+    existing_by_email = conn.execute(
+        "SELECT * FROM users WHERE email = ?",
+        (user_info["email"],)
+    ).fetchone()
+
+    if existing_by_email:
+        # 更新現有使用者的 OAuth 資訊
+        conn.execute(
+            """
+            UPDATE users SET oauth_provider = ?, oauth_id = ?
+            WHERE email = ?
+            """,
+            ("streamlit_native", user_info["oauth_id"], user_info["email"])
+        )
+        conn.commit()
+        conn.close()
+        return dict(existing_by_email)
+
+    # 建立新帳號，確保 username 唯一
+    base_username = user_info["username"]
+    username = base_username
+    counter = 1
+
+    while True:
+        existing = conn.execute(
+            "SELECT id FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if not existing:
+            break
+        username = f"{base_username}{counter}"
+        counter += 1
+
+    import secrets as secrets_lib
+    random_pw = secrets_lib.token_urlsafe(32)
+
+    conn.execute(
+        """
+        INSERT INTO users (username, password_hash, email, oauth_provider, oauth_id, credits)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (username, hash_password(random_pw), user_info["email"],
+         user_info["oauth_provider"], user_info["oauth_id"], 100)
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT * FROM users WHERE oauth_provider = ? AND oauth_id = ?",
+        ("streamlit_native", user_info["oauth_id"])
+    ).fetchone()
+    conn.close()
+
+    return dict(row) if row else None
+
+
 # ── 主頁面路由 ────────────────────────────────────────────
 
 def main() -> None:
@@ -158,20 +281,111 @@ def main() -> None:
     config = initialize_app()
     apply_custom_css()
 
-    # 處理 OAuth 回呼（若存在）
-    handle_oauth_callback()
+    # ── 處理 Streamlit 內建 Authentication ─────────────────
+    use_streamlit_auth = check_streamlit_auth()
 
-    # 根據登入狀態決定顯示哪個頁面
-    if not st.session_state.get("logged_in"):
-        render_unauthenticated_page(config)
+    if use_streamlit_auth:
+        # 檢查是否已登入（Google 或本地帳號）
+        is_logged_in_via_streamlit = False
+        is_logged_in_via_local = st.session_state.get("logged_in", False)
+
+        # 檢查 Streamlit Google OAuth 登入狀態
+        try:
+            if hasattr(st, 'user') and st.user.is_logged_in:
+                is_logged_in_via_streamlit = True
+        except Exception:
+            pass
+
+        # 若都未登入，顯示登入頁面
+        if not is_logged_in_via_streamlit and not is_logged_in_via_local:
+            st.markdown(
+                '<div class="main-header">📚 AI 學習助手</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<div class="sub-header">上傳復習資料，AI 自動生成練習題與考試卷</div>',
+                unsafe_allow_html=True,
+            )
+
+            # 登入 / 註冊分頁
+            tab1, tab2 = st.tabs(["🔑 Google 快速登入", "📧 帳號登入"])
+
+            with tab1:
+                # Google 快速登入
+                left_col, right_col = st.columns([1, 1])
+
+                with left_col:
+                    st.markdown("### 🌐 快速登入")
+                    st.markdown(
+                        """
+                        ✨ **核心功能**：
+                        - 📄 上傳 PDF / Word 復習資料
+                        - 🔍 自動解析文件內容（支援 OCR）
+                        - 📝 一鍵生成練習題（Worksheet）
+                        - 📋 自動生成模擬考試卷
+                        - 👶 管理多個孩子的學習資料
+                        - 💯 每位使用者 100 次免費生成
+                        """
+                    )
+
+                with right_col:
+                    st.markdown("### 🔑 Google 登入")
+                    st.markdown("點擊下方按鈕，使用您的 Google 帳號快速登入")
+                    st.button(
+                        "🔑 使用 Google 帳號登入",
+                        on_click=st.login,
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+            with tab2:
+                # 本地帳號登入/註冊
+                left_col, right_col = st.columns([1, 1])
+
+                with left_col:
+                    st.markdown("### 🔐 登入")
+                    render_login_form()
+
+                with right_col:
+                    st.markdown("### 📝 註冊新帳號")
+                    render_register_form()
+
+                st.info("💡 提示：使用 Google 快速登入可免記帳號密碼！")
+
+            st.stop()
+
+        # 已登入，處理同步
+        if is_logged_in_via_streamlit:
+            streamlit_user = get_streamlit_user()
+            if streamlit_user:
+                db_user = sync_streamlit_user_to_db(streamlit_user)
+                if db_user:
+                    # 使用資料庫使用者資訊
+                    login_user(db_user)
+                else:
+                    # 若同步失敗，使用 Streamlit 使用者資訊
+                    st.session_state["user"] = streamlit_user
+                    st.session_state["logged_in"] = True
+                    st.session_state["is_admin"] = False
+        # 本地帳號已登入，不需要處理（session_state 已設置）
     else:
-        render_authenticated_app(config)
+        # ── 使用自訂 OAuth 實現 ───────────────────────────────
+        # 處理 OAuth 回呼（若存在）
+        handle_oauth_callback()
+
+        # 根據登入狀態決定顯示哪個頁面
+        if not st.session_state.get("logged_in"):
+            render_unauthenticated_page(config)
+            return
+
+    # ── 顯示已登入的應用程式 ─────────────────────────────────
+    render_authenticated_app(config)
 
 
 # ── 未登入頁面 ────────────────────────────────────────────
 
 def render_unauthenticated_page(config: dict) -> None:
-    """繪製未登入頁面（登入/註冊）"""
+    """繪製未登入頁面（登入/註冊 + OIDC 登錄）"""
     st.markdown(
         '<div class="main-header">📚 AI 學習助手</div>',
         unsafe_allow_html=True,
@@ -181,26 +395,28 @@ def render_unauthenticated_page(config: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # 登入 / 註冊分頁
-    tab1, tab2 = st.tabs(["🔐 登入", "📝 註冊"])
+    # 登入 / 註冊分頁（先在外部定義）
+    tab1, tab2 = st.tabs(["📧 帳號登入", "🌐 快速登入"])
 
     with tab1:
-        # ── OAuth 第三方登入（醒目置頂） ──────────────────
-        _render_inline_oauth_buttons()
+        # 左右分佈：左邊 email 登錄/註冊，右邊 OIDC 登錄
+        left_col, right_col = st.columns([1, 1])
 
-        # ── 分隔線 ───────────────────────────────────────
-        st.markdown("---")
-        st.markdown(
-            '<p style="text-align:center; color:#888;">── 或使用帳號密碼登入 ──</p>',
-            unsafe_allow_html=True,
-        )
-
-        col_left, col_right = st.columns([1, 2])
-
-        with col_left:
+        with left_col:
+            st.markdown("### 🔐 登入表單")
             render_login_form()
+            st.markdown("---")
+            st.markdown("### 📝 註冊新帳號")
+            render_register_form()
 
-        with col_right:
+        with right_col:
+            st.markdown("### 🌐 第三方登入")
+            _render_inline_oauth_buttons()
+
+            # 分隔線
+            st.markdown("---")
+
+            # 功能介紹
             st.markdown("### 功能介紹")
             st.markdown(
                 """
@@ -213,7 +429,7 @@ def render_unauthenticated_page(config: dict) -> None:
                 - 💯 每位使用者 100 次免費生成
 
                 🚀 **快速開始**：
-                1. 註冊帳號或直接登入
+                1. 註冊帳號或使用第三方登入
                 2. 新增 Kid 並選擇年級
                 3. 上傳復習資料
                 4. 生成練習題或考試卷！
@@ -221,7 +437,7 @@ def render_unauthenticated_page(config: dict) -> None:
             )
 
     with tab2:
-        render_register_form()
+        st.info("此頁面目前與「帳號登入」功能相同，請使用上方的選項卡進行登入或註冊。")
 
     # 部署模式顯示
     deployment = config.get("LEARNING_DEPLOYMENT", "local")
@@ -333,8 +549,8 @@ def render_sidebar(user: dict, config: dict) -> None:
 
     # 登出按鈕
     if st.button("🚪 登出", use_container_width=True):
-        logout_user()
-        st.rerun()
+        # 使用 Streamlit 內建 logout
+        st.logout()
 
     # 部署模式標籤
     deployment = config.get("LEARNING_DEPLOYMENT", "local")
