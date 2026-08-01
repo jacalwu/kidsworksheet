@@ -1,0 +1,37 @@
+# ═══════════════════════════════════════════════════════════
+# AI 學習助手 — Python 依賴套件
+# ═══════════════════════════════════════════════════════════
+# 安裝方式：pip install -r requirements.txt
+# ═══════════════════════════════════════════════════════════
+
+# ── 核心框架 ──────────────────────────────────────────────
+streamlit>=1.28.0
+
+# ── 檔案解析 ──────────────────────────────────────────────
+PyPDF2>=3.0.0
+pdfplumber>=0.10.0
+python-docx>=0.8.11
+Pillow>=10.0.0
+
+# ── LLM API ───────────────────────────────────────────────
+openai>=1.0.0
+
+# ── 網路請求 ──────────────────────────────────────────────
+requests>=2.31.0
+
+# ── TOML 設定讀取（Python 3.11+ 內建 tomllib）─────────────
+tomli>=2.0.0
+
+# ── 可選：OCR 功能（需要額外安裝系統套件）─────────────────
+# 若需使用 PDF OCR 功能，請安裝以下套件：
+#   pip install pytesseract pdf2image
+# 並安裝系統套件：
+#   Windows：下載 Tesseract (https://github.com/UB-Mannheim/tesseract/wiki)
+#            下載 Poppler (https://github.com/oschwartz10612/poppler-windows/releases)
+#   macOS：  brew install tesseract poppler
+#   Ubuntu： sudo apt install tesseract-ocr tesseract-ocr-chi-tra poppler-utils
+# pytesseract>=0.3.10
+# pdf2image>=1.16.0
+
+# ── 可選：OAuth 認證 ──────────────────────────────────────
+# authlib>=1.2.0

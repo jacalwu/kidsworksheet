@@ -1,0 +1,58 @@
+# ═══════════════════════════════════════════════════════════
+# AI 學習助手 — 設定檔範例
+# ═══════════════════════════════════════════════════════════
+# 使用方式：
+#   1. 複製此檔案為 config.toml
+#   2. 修改下方設定值
+#   3. 執行程式：streamlit run streamlit_app.py
+#
+# 部署到 Streamlit Cloud 時，請將這些設定放入
+# .streamlit/secrets.toml 檔案中。
+# ═══════════════════════════════════════════════════════════
+
+# ── 部署模式 ──────────────────────────────────────────────
+# "local"  = Mock 模式，不呼叫真實 API，適合本地開發測試
+# "cloud"  = 雲端模式，使用真實 DeepSeek API 與 Web Search
+LEARNING_DEPLOYMENT = "local"
+
+# ── DeepSeek LLM 設定 ─────────────────────────────────────
+# DeepSeek API Key（從 https://platform.deepseek.com 取得）
+LEARNING_API_KEY = ""
+# LLM 模型名稱
+LEARNING_LLM_MODEL = "deepseek-chat"
+# LLM API 端點（DeepSeek 使用 OpenAI 相容介面）
+LEARNING_LLM_URL = "https://api.deepseek.com/v1"
+
+# ── Web Search 設定 ───────────────────────────────────────
+# 搜尋引擎 API Key（SerpAPI 或 Bing Search API）
+LEARNING_WEB_SEARCH_API_KEY = ""
+# 搜尋引擎類型："serpapi" 或 "bing"
+LEARNING_WEB_SEARCH_ENGINE = "serpapi"
+
+# ── 資料庫與檔案設定 ──────────────────────────────────────
+# SQLite 資料庫檔案路徑
+LEARNING_DATABASE_PATH = "learning_app.db"
+# 上傳檔案儲存目錄
+LEARNING_UPLOAD_DIR = "uploads"
+
+# ── 管理員設定 ────────────────────────────────────────────
+# 預設管理員帳號（首次登入後請立即修改密碼）
+LEARNING_ADMIN_USERNAME = "jacalwu"
+LEARNING_ADMIN_PASSWORD = "jacalwu123456"
+
+# ── 配額設定 ──────────────────────────────────────────────
+# 新使用者預設配額（生成次數）
+LEARNING_DEFAULT_CREDITS = 100
+
+# ── OAuth 設定（選填）─────────────────────────────────────
+# Google OAuth（需在 Google Cloud Console 建立憑證）
+# GOOGLE_CLIENT_ID = "your-client-id.apps.googleusercontent.com"
+# GOOGLE_CLIENT_SECRET = "your-client-secret"
+
+# Facebook OAuth（需在 Facebook Developers 建立應用程式）
+# FACEBOOK_CLIENT_ID = "your-facebook-app-id"
+# FACEBOOK_CLIENT_SECRET = "your-facebook-app-secret"
+
+# WeChat OAuth（需在微信開放平台申請，僅限中國大陸使用）
+# WECHAT_CLIENT_ID = "your-wechat-app-id"
+# WECHAT_CLIENT_SECRET = "your-wechat-app-secret"
