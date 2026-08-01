@@ -52,6 +52,7 @@ from utils.auth import (
     render_register_form,
     render_change_password_form,
     render_oauth_section,
+    _render_inline_oauth_buttons,
     handle_oauth_callback,
 )
 from utils.parsers import (
@@ -184,6 +185,16 @@ def render_unauthenticated_page(config: dict) -> None:
     tab1, tab2 = st.tabs(["🔐 登入", "📝 註冊"])
 
     with tab1:
+        # ── OAuth 第三方登入（醒目置頂） ──────────────────
+        _render_inline_oauth_buttons()
+
+        # ── 分隔線 ───────────────────────────────────────
+        st.markdown("---")
+        st.markdown(
+            '<p style="text-align:center; color:#888;">── 或使用帳號密碼登入 ──</p>',
+            unsafe_allow_html=True,
+        )
+
         col_left, col_right = st.columns([1, 2])
 
         with col_left:
@@ -211,10 +222,6 @@ def render_unauthenticated_page(config: dict) -> None:
 
     with tab2:
         render_register_form()
-
-    # OAuth 區塊
-    st.markdown("---")
-    render_oauth_section()
 
     # 部署模式顯示
     deployment = config.get("LEARNING_DEPLOYMENT", "local")

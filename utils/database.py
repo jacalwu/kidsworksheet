@@ -269,12 +269,12 @@ def deduct_credit(user_id: int) -> bool:
     return False
 
 
-def get_all_users() -> list[sqlite3.Row]:
-    """取得所有使用者（管理員用）"""
+def get_all_users() -> list[dict]:
+    """取得所有使用者（管理員用），回傳 dict 列表以支援 .get() 操作"""
     conn = get_connection()
     rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
     conn.close()
-    return rows
+    return [dict(row) for row in rows]
 
 
 # ── Kid CRUD ──────────────────────────────────────────────
@@ -400,8 +400,8 @@ def get_usage_records_by_user(user_id: int) -> list[sqlite3.Row]:
     return rows
 
 
-def get_all_usage_records() -> list[sqlite3.Row]:
-    """取得所有使用紀錄（管理員用）"""
+def get_all_usage_records() -> list[dict]:
+    """取得所有使用紀錄（管理員用），回傳 dict 列表以支援 .get() 操作"""
     conn = get_connection()
     rows = conn.execute(
         """
@@ -412,7 +412,7 @@ def get_all_usage_records() -> list[sqlite3.Row]:
         """
     ).fetchall()
     conn.close()
-    return rows
+    return [dict(row) for row in rows]
 
 
 # ── 管理員初始化 ──────────────────────────────────────────

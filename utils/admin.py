@@ -30,8 +30,8 @@ def render_admin_panel(config: dict = None) -> None:
         return
 
     # 分頁
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "👥 使用者管理", "📊 使用紀錄", "📥 匯出資料", "⚙️ LLM 配置",
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "👥 使用者管理", "📊 使用紀錄", "📥 匯出資料", "⚙️ LLM 配置", "🔐 OAuth 整合",
     ])
 
     with tab1:
@@ -45,6 +45,9 @@ def render_admin_panel(config: dict = None) -> None:
 
     with tab4:
         _render_llm_config(config or {})
+
+    with tab5:
+        _render_oauth_config(config or {})
 
 
 def _render_user_management() -> None:
@@ -413,6 +416,201 @@ def _render_llm_config(config: dict) -> None:
                     st.rerun()
     else:
         st.info("目前沒有任何設定儲存在資料庫中，所有設定使用 config.toml / 預設值。")
+
+
+def _render_oauth_config(config: dict) -> None:
+    """繪製 OAuth 整合配置頁面，讓管理員在 UI 中管理第三方登入設定
+
+    所有修改會直接寫入資料庫（app_settings 表），
+    優先於 config.toml / secrets / JSON 憑證檔。
+    """
+    st.markdown("### 🔐 OAuth 第三方登入整合")
+    st.caption(
+        "在此修改的設定會儲存到資料庫，優先於 `config.toml` 與 `secrets.toml`。"
+        "啟用並設定後，使用者即可在登入頁面使用對應的第三方帳號登入。"
+    )
+
+    # 從 auth 模組匯入常數
+    from utils.auth import (
+        OAUTH_PROVIDERS,
+        _load_google_oauth_config,
+        _load_facebook_oauth_config,
+        _load_wechat_oauth_config,
+    )
+
+    # ── 定義各 Provider 的資訊 ─────────────────────────────
+    providers_info = {
+        "google": {
+            "name": "Google",
+            "icon": "🟢",
+            "color": "#4285F4",
+            "description": "Google 帳號登入。需在 Google Cloud Console 建立 OAuth 2.0 憑證。",
+            "docs_url": "https://console.cloud.google.com/apis/credentials",
+            "loader": _load_google_oauth_config,
+        },
+        "facebook": {
+            "name": "Facebook",
+            "icon": "🔵",
+            "color": "#1877F2",
+            "description": "Facebook 帳號登入。需在 Meta for Developers 建立應用程式。",
+            "docs_url": "https://developers.facebook.com/apps/",
+            "loader": _load_facebook_oauth_config,
+        },
+        "wechat": {
+            "name": "WeChat",
+            "icon": "🟢",
+            "color": "#07C160",
+            "description": "微信帳號登入。需在微信開放平台申請網站應用。",
+            "docs_url": "https://open.weixin.qq.com/",
+            "loader": _load_wechat_oauth_config,
+        },
+    }
+
+    # ── 讀取目前 DB 中的設定 ─────────────────────────────
+    db_settings = get_all_settings()
+
+    st.markdown("#### 📋 目前設定狀態")
+
+    # 顯示各 provider 狀態總覽
+    status_data = []
+    for key, info in providers_info.items():
+        config_data = info["loader"]()
+        enabled = config_data.get("enabled", False)
+        has_creds = bool(config_data.get("client_id") and config_data.get("client_secret"))
+
+        if not enabled:
+            status_icon = "🔴 已停用"
+        elif has_creds:
+            status_icon = "🟢 已啟用"
+        else:
+            status_icon = "🟡 已啟用（未設定憑證）"
+
+        cid_display = config_data.get("client_id", "-")
+        if len(cid_display or "") > 30:
+            cid_display = cid_display[:30] + "…"
+
+        status_data.append({
+            "Provider": info["name"],
+            "狀態": status_icon,
+            "Client ID": cid_display or "-",
+            "來源": config_data.get("source", "-"),
+        })
+
+    st.dataframe(status_data, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("#### ✏️ 修改設定")
+
+    # ── 每個 Provider 一個 Expander ────────────────────────
+    for provider_key, info in providers_info.items():
+        current_config = info["loader"]()
+        db_enabled = db_settings.get(f"OAUTH_{provider_key.upper()}_ENABLED", "")
+        db_client_id = db_settings.get(f"OAUTH_{provider_key.upper()}_CLIENT_ID", "")
+        db_client_secret = db_settings.get(f"OAUTH_{provider_key.upper()}_CLIENT_SECRET", "")
+
+        # 判斷目前是否已啟用
+        if db_enabled:
+            is_enabled_db = db_enabled.lower() == "true"
+        else:
+            is_enabled_db = current_config.get("enabled", True)
+
+        expander_title = f"{info['icon']} {info['name']}"
+        if not current_config.get("enabled", True):
+            expander_title += " （已停用）"
+        elif current_config.get("client_id"):
+            expander_title += " ✅"
+
+        with st.expander(expander_title, expanded=False):
+            st.caption(info["description"])
+            st.caption(f"📖 [查看文件]({info['docs_url']})")
+
+            # 顯示 redirect URI
+            provider_meta = OAUTH_PROVIDERS.get(provider_key, {})
+            redirect_uris = current_config.get("redirect_uris", ["未設定"])
+            st.markdown(f"**Redirect URI**：`{redirect_uris[0]}`")
+            st.caption("請將此 URI 加入 OAuth provider 的允許 redirect URI 清單中。")
+
+            st.markdown("---")
+
+            with st.form(f"oauth_form_{provider_key}", clear_on_submit=False):
+                # Toggle 開關
+                enabled = st.toggle(
+                    f"啟用 {info['name']} 登入",
+                    value=is_enabled_db,
+                    help=f"關閉後使用者將無法使用 {info['name']} 帳號登入",
+                    key=f"oauth_enable_{provider_key}",
+                )
+
+                # 目前設定來源
+                source_label = current_config.get("source", "⭐ 預設值")
+                st.caption(f"目前設定來源：{source_label}")
+
+                # Client ID
+                client_id = st.text_input(
+                    "Client ID",
+                    value=db_client_id if db_client_id else "",
+                    placeholder=current_config.get("client_id", "") or "輸入 Client ID",
+                    help=f"{info['name']} 應用程式的 Client ID / App ID",
+                    key=f"oauth_cid_{provider_key}",
+                )
+
+                # Client Secret
+                client_secret = st.text_input(
+                    "Client Secret",
+                    type="password",
+                    value=db_client_secret if db_client_secret else "",
+                    placeholder="輸入 Client Secret（留空表示不修改）",
+                    help=f"{info['name']} 應用程式的 Client Secret / App Secret",
+                    key=f"oauth_csec_{provider_key}",
+                )
+
+                col_save, col_delete = st.columns([1, 1])
+
+                with col_save:
+                    submitted = st.form_submit_button(
+                        "💾 儲存設定", use_container_width=True,
+                        key=f"oauth_save_{provider_key}",
+                    )
+
+                with col_delete:
+                    clear = st.form_submit_button(
+                        "🗑️ 清除 DB 設定", use_container_width=True,
+                        help="刪除此 provider 的資料庫設定，回退到 config.toml / 憑證檔",
+                        key=f"oauth_clear_{provider_key}",
+                    )
+
+            if submitted:
+                prefix = f"OAUTH_{provider_key.upper()}"
+                set_setting(f"{prefix}_ENABLED", "true" if enabled else "false")
+                if client_id.strip():
+                    set_setting(f"{prefix}_CLIENT_ID", client_id.strip())
+                if client_secret.strip():
+                    set_setting(f"{prefix}_CLIENT_SECRET", client_secret.strip())
+                st.success(f"✅ {info['name']} 設定已儲存！")
+                st.rerun()
+
+            if clear:
+                prefix = f"OAUTH_{provider_key.upper()}"
+                for key in [f"{prefix}_ENABLED", f"{prefix}_CLIENT_ID", f"{prefix}_CLIENT_SECRET"]:
+                    delete_setting(key)
+                st.success(f"✅ 已清除 {info['name']} 的 DB 設定，回退到檔案設定值。")
+                st.rerun()
+
+    # ── 全部清除按鈕 ─────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 🔧 全部重設")
+
+    oauth_db_keys = [k for k in db_settings if k.startswith("OAUTH_")]
+    if oauth_db_keys:
+        st.caption(f"目前有 {len(oauth_db_keys)} 項 OAuth 設定儲存在資料庫中：")
+        st.caption(", ".join(oauth_db_keys))
+        if st.button("🗑️ 清除全部 OAuth DB 設定", use_container_width=True):
+            for k in oauth_db_keys:
+                delete_setting(k)
+            st.success(f"✅ 已清除 {len(oauth_db_keys)} 項 OAuth DB 設定。")
+            st.rerun()
+    else:
+        st.info("目前沒有任何 OAuth 設定儲存在資料庫中。")
 
 
 def _export_users_csv() -> str:

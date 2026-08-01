@@ -202,39 +202,121 @@ def render_change_password_form() -> None:
             st.rerun()
 
 
-# ── Google OAuth 設定讀取 ──────────────────────────────────
+# ── OAuth Provider 設定鍵名對照 ─────────────────────────────
+
+# 每個 provider 在各設定來源中的鍵名前綴
+PROVIDER_CONFIG_KEYS = {
+    "google": {
+        "db_prefix": "OAUTH_GOOGLE",
+        "secrets_client_id": "GOOGLE_CLIENT_ID",
+        "secrets_client_secret": "GOOGLE_CLIENT_SECRET",
+        "default_redirect_uri": "http://localhost:8501/oauth_callback",
+        "has_json_file": True,  # Google 可從 client_secret_*.json 讀取
+    },
+    "facebook": {
+        "db_prefix": "OAUTH_FACEBOOK",
+        "secrets_client_id": "FACEBOOK_CLIENT_ID",
+        "secrets_client_secret": "FACEBOOK_CLIENT_SECRET",
+        "default_redirect_uri": "http://localhost:8501/oauth_callback",
+        "has_json_file": False,
+    },
+    "wechat": {
+        "db_prefix": "OAUTH_WECHAT",
+        "secrets_client_id": "WECHAT_CLIENT_ID",
+        "secrets_client_secret": "WECHAT_CLIENT_SECRET",
+        "default_redirect_uri": "http://localhost:8501/oauth_callback",
+        "has_json_file": False,
+    },
+}
+
+
+def _load_oauth_config_from_db(provider: str) -> dict:
+    """從資料庫讀取 OAuth 設定（最高優先層級）
+
+    Args:
+        provider: "google" / "facebook" / "wechat"
+
+    Returns:
+        dict: {"enabled": bool, "client_id": str, "client_secret": str}
+              若 DB 中無設定則回傳空值
+    """
+    try:
+        from utils.database import get_all_settings
+    except ImportError:
+        return {"enabled": True, "client_id": "", "client_secret": ""}
+
+    try:
+        db_settings = get_all_settings()
+        prefix = PROVIDER_CONFIG_KEYS[provider]["db_prefix"]
+        enabled_str = db_settings.get(f"{prefix}_ENABLED", "")
+        if enabled_str:
+            enabled = enabled_str.lower() == "true"
+        else:
+            enabled = True  # 預設啟用（若未在 DB 中明確停用）
+        return {
+            "enabled": enabled,
+            "client_id": db_settings.get(f"{prefix}_CLIENT_ID", ""),
+            "client_secret": db_settings.get(f"{prefix}_CLIENT_SECRET", ""),
+            "source": "🗄️ 資料庫",
+        }
+    except Exception:
+        return {"enabled": True, "client_id": "", "client_secret": "", "source": ""}
+
+
+# ── OAuth 設定讀取 ──────────────────────────────────────────
 
 def _load_google_oauth_config() -> dict:
     """從多個來源讀取 Google OAuth 設定
 
     優先順序：
-    1. client_secret_*.json 檔案（Google Cloud Console 下載的憑證檔）
-    2. Streamlit secrets（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET）
-    3. config.toml（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET）
+    1. 資料庫 app_settings（管理員 UI 設定，最高優先）
+    2. client_secret_*.json 檔案（Google Cloud Console 下載的憑證檔）
+    3. Streamlit secrets（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET）
+    4. config.toml（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET）
 
     Returns:
-        dict: {"client_id": str, "client_secret": str, "redirect_uris": list}
-              若未設定則所有值為空
+        dict: {"enabled": bool, "client_id": str, "client_secret": str,
+               "redirect_uris": list, "source": str}
     """
     result = {
+        "enabled": True,
         "client_id": "",
         "client_secret": "",
         "redirect_uris": ["http://localhost:8501/oauth_callback"],
+        "source": "⭐ 未設定",
     }
+
+    # 0. 嘗試從資料庫讀取（最高優先）
+    db_config = _load_oauth_config_from_db("google")
+    if not db_config["enabled"]:
+        result["enabled"] = False
+        result["source"] = "🗄️ 資料庫（已停用）"
+        return result
+    if db_config["client_id"] and db_config["client_secret"]:
+        result["enabled"] = True
+        result["client_id"] = db_config["client_id"]
+        result["client_secret"] = db_config["client_secret"]
+        result["source"] = "🗄️ 資料庫"
+        return result
 
     # 1. 嘗試從 Google 憑證 JSON 檔案讀取
     json_paths = []
-    for fname in os.listdir("."):
-        if fname.startswith("client_secret_") and fname.endswith(".json"):
-            json_paths.append(fname)
-    # 也檢查 .streamlit 目錄
+    try:
+        for fname in os.listdir("."):
+            if fname.startswith("client_secret_") and fname.endswith(".json"):
+                json_paths.append(fname)
+    except Exception:
+        pass
     streamlit_dir = ".streamlit"
     if os.path.isdir(streamlit_dir):
-        for fname in os.listdir(streamlit_dir):
-            if fname.startswith("client_secret_") and fname.endswith(".json"):
-                json_paths.append(os.path.join(streamlit_dir, fname))
+        try:
+            for fname in os.listdir(streamlit_dir):
+                if fname.startswith("client_secret_") and fname.endswith(".json"):
+                    json_paths.append(os.path.join(streamlit_dir, fname))
+        except Exception:
+            pass
 
-    for json_path in json_paths[:1]:  # 只使用第一個找到的
+    for json_path in json_paths[:1]:
         try:
             with open(json_path, "r") as f:
                 data = json.load(f)
@@ -245,6 +327,7 @@ def _load_google_oauth_config() -> dict:
             if uris:
                 result["redirect_uris"] = uris
             if result["client_id"] and result["client_secret"]:
+                result["source"] = "📄 JSON 憑證檔"
                 return result
         except Exception:
             pass
@@ -256,6 +339,7 @@ def _load_google_oauth_config() -> dict:
         if cid and csec:
             result["client_id"] = cid
             result["client_secret"] = csec
+            result["source"] = "🔒 Secrets"
             return result
     except Exception:
         pass
@@ -273,6 +357,97 @@ def _load_google_oauth_config() -> dict:
         if cid and csec:
             result["client_id"] = cid
             result["client_secret"] = csec
+            result["source"] = "📄 config.toml"
+    except Exception:
+        pass
+
+    return result
+
+
+def _load_facebook_oauth_config() -> dict:
+    """從多個來源讀取 Facebook OAuth 設定
+
+    優先順序：DB > Streamlit secrets > config.toml
+
+    Returns:
+        dict: {"enabled": bool, "client_id": str, "client_secret": str,
+               "redirect_uris": list, "source": str}
+    """
+    return _load_generic_oauth_config("facebook")
+
+
+def _load_wechat_oauth_config() -> dict:
+    """從多個來源讀取 WeChat OAuth 設定
+
+    優先順序：DB > Streamlit secrets > config.toml
+
+    Returns:
+        dict: {"enabled": bool, "client_id": str, "client_secret": str,
+               "redirect_uris": list, "source": str}
+    """
+    return _load_generic_oauth_config("wechat")
+
+
+def _load_generic_oauth_config(provider: str) -> dict:
+    """通用的 OAuth 設定讀取函式（適用於 Facebook / WeChat）
+
+    優先順序：DB > Streamlit secrets > config.toml
+
+    Args:
+        provider: "facebook" / "wechat"
+
+    Returns:
+        dict: {"enabled": bool, "client_id": str, "client_secret": str,
+               "redirect_uris": list, "source": str}
+    """
+    keys = PROVIDER_CONFIG_KEYS[provider]
+    result = {
+        "enabled": True,
+        "client_id": "",
+        "client_secret": "",
+        "redirect_uris": [keys["default_redirect_uri"]],
+        "source": "⭐ 未設定",
+    }
+
+    # 0. 資料庫（最高優先）
+    db_config = _load_oauth_config_from_db(provider)
+    if not db_config["enabled"]:
+        result["enabled"] = False
+        result["source"] = "🗄️ 資料庫（已停用）"
+        return result
+    if db_config["client_id"] and db_config["client_secret"]:
+        result["enabled"] = True
+        result["client_id"] = db_config["client_id"]
+        result["client_secret"] = db_config["client_secret"]
+        result["source"] = "🗄️ 資料庫"
+        return result
+
+    # 1. Streamlit secrets
+    try:
+        cid = st.secrets.get(keys["secrets_client_id"], "")
+        csec = st.secrets.get(keys["secrets_client_secret"], "")
+        if cid and csec:
+            result["client_id"] = cid
+            result["client_secret"] = csec
+            result["source"] = "🔒 Secrets"
+            return result
+    except Exception:
+        pass
+
+    # 2. config.toml
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
+    try:
+        with open("config.toml", "rb") as f:
+            cfg = tomllib.load(f)
+        cid = cfg.get(keys["secrets_client_id"], "")
+        csec = cfg.get(keys["secrets_client_secret"], "")
+        if cid and csec:
+            result["client_id"] = cid
+            result["client_secret"] = csec
+            result["source"] = "📄 config.toml"
     except Exception:
         pass
 
@@ -282,25 +457,46 @@ def _load_google_oauth_config() -> dict:
 def _get_redirect_uri(allowed_uris: list[str]) -> str:
     """根據目前執行環境選擇合適的 redirect URI
 
-    優先選擇與目前主機名稱匹配的 URI，若無匹配則選 localhost。
+    若目前執行在 localhost 則優先使用 localhost URI；
+    若在部署環境（Streamlit Cloud）則優先使用非 localhost URI。
     """
-    # 檢測目前是否在 Streamlit Cloud 上
-    try:
-        # Streamlit Cloud 通常設定 STREAMLIT_SERVER_PORT 等環境變數
-        from urllib.parse import urlparse
+    import socket
 
-        # 嘗試從 st 取得目前 script run 的 URL
-        if hasattr(st, "scriptrunner"):
-            pass
+    # 檢測是否在 localhost 執行
+    is_localhost = False
+    try:
+        hostname = socket.gethostname()
+        if hostname in ("localhost", "127.0.0.1", "::1"):
+            is_localhost = True
+        # 也檢查 Streamlit 內建 server 位址
+        server_address = st.get_option("server.address") if hasattr(st, "get_option") else ""
+        if server_address in ("localhost", "127.0.0.1", "0.0.0.0"):
+            is_localhost = True
     except Exception:
         pass
+
+    # 檢查是否可以從環境變數判斷
+    if not is_localhost:
+        try:
+            import os
+            streamlit_server = os.environ.get("STREAMLIT_SERVER_ADDRESS", "")
+            if streamlit_server in ("localhost", "127.0.0.1"):
+                is_localhost = True
+        except Exception:
+            pass
+
+    if is_localhost:
+        # 優先回傳 localhost URI
+        for uri in allowed_uris:
+            if "localhost" in uri or "127.0.0.1" in uri:
+                return uri
 
     # 優先回傳非 localhost 的 URI（部署環境）
     for uri in allowed_uris:
         if "localhost" not in uri and "127.0.0.1" not in uri:
             return uri
 
-    # 回退到 localhost
+    # 回退
     for uri in allowed_uris:
         if "localhost" in uri or "127.0.0.1" in uri:
             return uri
@@ -336,52 +532,152 @@ def build_oauth_url(provider: str, client_id: str, redirect_uri: str) -> str:
     return f"{config['authorize_url']}?{urllib.parse.urlencode(params)}"
 
 
-def render_oauth_section() -> None:
-    """繪製 OAuth 登入選項區塊
+def _render_inline_oauth_buttons() -> None:
+    """在登入頁面中直接繪製 OAuth 登入按鈕（無標題、無分隔線）
 
-    Google OAuth 已完整實作：從憑證 JSON 檔案或 config.toml 自動讀取設定。
-    Facebook 與 WeChat OAuth 提供說明與程式碼框架。
+    用於登入 tab 頂部醒目位置，讓使用者可以直接使用第三方帳號登入。
+    """
+    provider_styles = {
+        "google": {
+            "name": "Google",
+            "bg_color": "#4285F4",
+            "icon": "G",
+            "button_text": "使用 Google 帳號登入",
+        },
+        "facebook": {
+            "name": "Facebook",
+            "bg_color": "#1877F2",
+            "icon": "f",
+            "button_text": "使用 Facebook 帳號登入",
+        },
+        "wechat": {
+            "name": "WeChat",
+            "bg_color": "#07C160",
+            "icon": "微",
+            "button_text": "使用 WeChat 帳號登入",
+        },
+    }
+
+    loaders = {
+        "google": _load_google_oauth_config,
+        "facebook": _load_facebook_oauth_config,
+        "wechat": _load_wechat_oauth_config,
+    }
+
+    any_button_shown = False
+
+    for provider_key, loader in loaders.items():
+        config = loader()
+        style = provider_styles[provider_key]
+
+        if not config.get("enabled", True):
+            continue
+
+        if config["client_id"] and config["client_secret"]:
+            any_button_shown = True
+            redirect_uri = _get_redirect_uri(config["redirect_uris"])
+            oauth_url = build_oauth_url(provider_key, config["client_id"], redirect_uri)
+
+            st.markdown(
+                f"""
+                <a href="{oauth_url}" target="_self">
+                    <button style="
+                        background-color: {style['bg_color']}; color: white; border: none;
+                        padding: 14px 28px; border-radius: 8px; cursor: pointer;
+                        font-size: 17px; width: 100%; margin: 6px 0;
+                        font-family: 'Google Sans', Roboto, sans-serif;
+                        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+                        transition: transform 0.1s ease;">
+                        <span style="font-size: 22px; margin-right: 10px; font-weight: bold;">{style['icon']}</span>
+                        {style['button_text']}
+                    </button>
+                </a>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    if not any_button_shown:
+        st.info(
+            "💡 **第三方登入尚未設定**\n\n"
+            "管理員可在後台「🔐 OAuth 整合」頁面設定 Google / Facebook / WeChat 登入。"
+        )
+
+
+def render_oauth_section() -> None:
+    """繪製 OAuth 登入選項區塊（含標題與分隔線，用於獨立區塊）
+
+    支援 Google、Facebook、WeChat 三種 OAuth 登入。
+    管理員可透過後台 UI 啟用/停用各 provider 並設定 Client ID/Secret。
     """
     st.markdown("---")
     st.markdown("### 🌐 第三方登入")
 
-    google_config = _load_google_oauth_config()
+    # Provider 按鈕樣式定義
+    provider_styles = {
+        "google": {
+            "name": "Google",
+            "bg_color": "#4285F4",
+            "icon": "G",
+            "button_text": "使用 Google 帳號登入",
+        },
+        "facebook": {
+            "name": "Facebook",
+            "bg_color": "#1877F2",
+            "icon": "f",
+            "button_text": "使用 Facebook 帳號登入",
+        },
+        "wechat": {
+            "name": "WeChat",
+            "bg_color": "#07C160",
+            "icon": "微",
+            "button_text": "使用 WeChat 帳號登入",
+        },
+    }
 
-    if google_config["client_id"] and google_config["client_secret"]:
-        redirect_uri = _get_redirect_uri(google_config["redirect_uris"])
-        google_url = build_oauth_url("google", google_config["client_id"], redirect_uri)
+    loaders = {
+        "google": _load_google_oauth_config,
+        "facebook": _load_facebook_oauth_config,
+        "wechat": _load_wechat_oauth_config,
+    }
 
-        st.markdown(
-            f"""
-            <a href="{google_url}" target="_self">
-                <button style="
-                    background-color: #4285F4; color: white; border: none;
-                    padding: 12px 24px; border-radius: 6px; cursor: pointer;
-                    font-size: 16px; width: 100%; margin: 8px 0;
-                    font-family: 'Google Sans', Roboto, sans-serif;">
-                    <span style="font-size: 20px; margin-right: 8px;">G</span>
-                    使用 Google 帳號登入
-                </button>
-            </a>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption(f"🔗 Redirect URI：{redirect_uri}")
-    else:
+    any_button_shown = False
+
+    for provider_key, loader in loaders.items():
+        config = loader()
+        style = provider_styles[provider_key]
+
+        # 若管理員已停用此 provider
+        if not config.get("enabled", True):
+            continue
+
+        if config["client_id"] and config["client_secret"]:
+            any_button_shown = True
+            redirect_uri = _get_redirect_uri(config["redirect_uris"])
+            oauth_url = build_oauth_url(provider_key, config["client_id"], redirect_uri)
+
+            st.markdown(
+                f"""
+                <a href="{oauth_url}" target="_self">
+                    <button style="
+                        background-color: {style['bg_color']}; color: white; border: none;
+                        padding: 12px 24px; border-radius: 6px; cursor: pointer;
+                        font-size: 16px; width: 100%; margin: 8px 0;
+                        font-family: 'Google Sans', Roboto, sans-serif;">
+                        <span style="font-size: 20px; margin-right: 8px;">{style['icon']}</span>
+                        {style['button_text']}
+                    </button>
+                </a>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption(f"🔗 Redirect URI：{redirect_uri}　|　來源：{config.get('source', '')}")
+
+    if not any_button_shown:
         st.info(
-            "💡 **Google OAuth 未設定**\n\n"
-            "將 Google Cloud Console 下載的 `client_secret_*.json` 檔案放到專案根目錄，\n"
-            "或在 `config.toml` 中設定：\n"
-            "```toml\n"
-            'GOOGLE_CLIENT_ID = "your-client-id.apps.googleusercontent.com"\n'
-            'GOOGLE_CLIENT_SECRET = "GOCSPX-xxxxx"\n'
-            "```"
+            "💡 **第三方登入尚未設定**\n\n"
+            "管理員可在後台「🔐 OAuth 整合」頁面設定 Google / Facebook / WeChat 登入。\n"
+            "或將 `client_secret_*.json` 檔案放到專案根目錄（僅限 Google）。"
         )
-
-    st.caption(
-        "📌 **Facebook / WeChat OAuth 說明**：這些平台要求固定的 redirect URI "
-        "與額外的審核流程。詳見 README.md 的「OAuth 設定」章節。"
-    )
 
 
 def handle_oauth_callback() -> Optional[dict]:
