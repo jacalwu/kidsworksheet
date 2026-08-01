@@ -210,7 +210,7 @@ PROVIDER_CONFIG_KEYS = {
         "db_prefix": "OAUTH_GOOGLE",
         "secrets_client_id": "GOOGLE_CLIENT_ID",
         "secrets_client_secret": "GOOGLE_CLIENT_SECRET",
-        "default_redirect_uri": "http://localhost:8501/oauth_callback",
+        "default_redirect_uri": "https://kidsworksheet-tccp.streamlit.app/oauth_callback",
         "has_json_file": True,  # Google 可從 client_secret_*.json 讀取
     },
     "facebook": {
