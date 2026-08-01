@@ -263,7 +263,7 @@ def render_authenticated_app(config: dict) -> None:
     elif page == "change_password":
         render_change_password_form()
     elif page == "admin":
-        render_admin_panel()
+        render_admin_panel(config)
     else:
         render_dashboard(user)
 

@@ -95,6 +95,75 @@ def init_db() -> None:
         )
     """)
 
+    # 應用程式設定（管理員可透過 UI 修改 LLM 參數）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+# ── 應用程式設定 CRUD ─────────────────────────────────────
+
+def get_all_settings() -> dict:
+    """從資料庫讀取全部應用程式設定，回傳 dict"""
+    conn = get_connection()
+    rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+    conn.close()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def get_setting(key: str, default: str = "") -> str:
+    """讀取單一應用程式設定值
+
+    Args:
+        key: 設定鍵名
+        default: 若無此設定時的回退值
+
+    Returns:
+        str: 設定值
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = ?", (key,)
+    ).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    """寫入或更新應用程式設定（UPSERT）
+
+    Args:
+        key: 設定鍵名
+        value: 設定值
+    """
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        """,
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_setting(key: str) -> None:
+    """刪除單一應用程式設定（讓它回退到 config.toml / 預設值）
+
+    Args:
+        key: 設定鍵名
+    """
+    conn = get_connection()
+    conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
     conn.commit()
     conn.close()
 

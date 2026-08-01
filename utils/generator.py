@@ -17,9 +17,9 @@ from io import BytesIO
 # ── 設定載入 ──────────────────────────────────────────────
 
 def load_config() -> dict:
-    """從 TOML 設定檔或 Streamlit secrets 載入設定
+    """從資料庫、TOML 設定檔或 Streamlit secrets 載入設定
 
-    優先順序：Streamlit secrets > config.toml > 環境變數 > 預設值
+    優先順序：DB 設定 > Streamlit secrets > config.toml > 環境變數 > 預設值
     """
     config = {
         "LEARNING_DEPLOYMENT": "local",
@@ -29,6 +29,16 @@ def load_config() -> dict:
         "LEARNING_WEB_SEARCH_API_KEY": "",
         "LEARNING_WEB_SEARCH_ENGINE": "serpapi",
     }
+
+    # 0. 嘗試從資料庫讀取（最高優先，管理員可透過 UI 修改）
+    try:
+        from utils.database import get_all_settings
+        db_settings = get_all_settings()
+        for key in config:
+            if key in db_settings and db_settings[key]:
+                config[key] = db_settings[key]
+    except Exception:
+        pass  # DB 尚未初始化或無法連線，使用其他來源
 
     # 1. 嘗試從環境變數讀取
     for key in config:

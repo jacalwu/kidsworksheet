@@ -15,10 +15,13 @@ from utils.database import (
     get_user_by_id,
     update_user_credits,
     get_connection,
+    get_all_settings,
+    set_setting,
+    delete_setting,
 )
 
 
-def render_admin_panel() -> None:
+def render_admin_panel(config: dict = None) -> None:
     """繪製管理員控制面板"""
     st.markdown("## 🛠️ 管理員控制台")
 
@@ -27,7 +30,9 @@ def render_admin_panel() -> None:
         return
 
     # 分頁
-    tab1, tab2, tab3 = st.tabs(["👥 使用者管理", "📊 使用紀錄", "📥 匯出資料"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "👥 使用者管理", "📊 使用紀錄", "📥 匯出資料", "⚙️ LLM 配置",
+    ])
 
     with tab1:
         _render_user_management()
@@ -37,6 +42,9 @@ def render_admin_panel() -> None:
 
     with tab3:
         _render_export()
+
+    with tab4:
+        _render_llm_config(config or {})
 
 
 def _render_user_management() -> None:
@@ -197,6 +205,214 @@ def _render_export() -> None:
                 file_name=f"usage_records_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv",
             )
+
+
+def _render_llm_config(config: dict) -> None:
+    """繪製 LLM 配置頁面，讓管理員在 UI 中修改 LLM 與 Web Search 參數
+
+    所有修改會直接寫入資料庫（app_settings 表），
+    優先於 config.toml / secrets / 環境變數。
+    """
+    st.markdown("### ⚙️ LLM 與搜尋引擎配置")
+    st.caption(
+        "在此修改的設定會儲存到資料庫，優先於 `config.toml` 與 `secrets.toml`。"
+        "若刪除某設定，系統會自動回退到檔案中的設定值。"
+    )
+
+    # ── 定義可配置的 LLM 欄位 ────────────────────────────
+    LLM_FIELDS = [
+        {
+            "key": "LEARNING_DEPLOYMENT",
+            "label": "部署模式",
+            "help": "「local」為 Mock 模式（不需 API Key），「cloud」使用真實 API",
+            "type": "select",
+            "options": ["local", "cloud"],
+            "default": "local",
+        },
+        {
+            "key": "LEARNING_API_KEY",
+            "label": "DeepSeek API Key",
+            "help": "從 https://platform.deepseek.com 取得",
+            "type": "password",
+            "default": "",
+        },
+        {
+            "key": "LEARNING_LLM_MODEL",
+            "label": "LLM 模型名稱",
+            "help": "例如 deepseek-chat、deepseek-reasoner 等",
+            "type": "text",
+            "default": "deepseek-chat",
+        },
+        {
+            "key": "LEARNING_LLM_URL",
+            "label": "LLM API 端點 URL",
+            "help": "OpenAI 相容 API 的 Base URL",
+            "type": "text",
+            "default": "https://api.deepseek.com/v1",
+        },
+        {
+            "key": "LEARNING_WEB_SEARCH_API_KEY",
+            "label": "Web Search API Key",
+            "help": "SerpAPI 或 Bing Search API 的金鑰",
+            "type": "password",
+            "default": "",
+        },
+        {
+            "key": "LEARNING_WEB_SEARCH_ENGINE",
+            "label": "搜尋引擎",
+            "help": "選擇使用 SerpAPI（Google 搜尋）或 Bing Search API",
+            "type": "select",
+            "options": ["serpapi", "bing"],
+            "default": "serpapi",
+        },
+    ]
+
+    # ── 讀取目前 DB 中的設定 ─────────────────────────────
+    db_settings = get_all_settings()
+
+    # ── 判斷每項設定的實際來源 ───────────────────────────
+    def _get_source(key: str, default: str) -> str:
+        """判斷設定的生效來源"""
+        if key in db_settings and db_settings[key]:
+            return "🗄️ 資料庫"
+        try:
+            import streamlit as st
+            if st.secrets.get(key):
+                return "🔒 Secrets"
+        except Exception:
+            pass
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        try:
+            with open("config.toml", "rb") as f:
+                toml_cfg = tomllib.load(f)
+            if key in toml_cfg and toml_cfg[key]:
+                return "📄 config.toml"
+        except Exception:
+            pass
+        if key in os.environ and os.environ[key]:
+            return "🌐 環境變數"
+        return "⭐ 預設值"
+
+    import os
+
+    # ── 顯示目前設定總覽 ─────────────────────────────────
+    st.markdown("#### 📋 目前設定狀態")
+
+    status_data = []
+    for field in LLM_FIELDS:
+        current_value = config.get(field["key"], field["default"])
+        source = _get_source(field["key"], field["default"])
+        # 遮蔽 API Key 顯示
+        display_value = current_value
+        if field["type"] == "password" and current_value:
+            display_value = current_value[:6] + "…" + current_value[-4:] if len(current_value) > 10 else "****"
+        status_data.append({
+            "設定項": field["label"],
+            "目前值": display_value,
+            "來源": source,
+        })
+
+    st.dataframe(status_data, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ── 編輯表單 ─────────────────────────────────────────
+    st.markdown("#### ✏️ 修改設定")
+
+    with st.form("llm_config_form", clear_on_submit=False):
+        new_values = {}
+        for field in LLM_FIELDS:
+            current = db_settings.get(field["key"], "")
+            if field["type"] == "select":
+                opts = field["options"]
+                default_idx = opts.index(current) if current in opts else opts.index(field["default"])
+                new_values[field["key"]] = st.selectbox(
+                    f"{field['label']}",
+                    options=opts,
+                    index=default_idx,
+                    help=field["help"],
+                    key=f"cfg_{field['key']}",
+                )
+            elif field["type"] == "password":
+                new_values[field["key"]] = st.text_input(
+                    f"{field['label']}",
+                    type="password",
+                    value=current,
+                    help=field["help"],
+                    placeholder="輸入新值（留空表示不修改）",
+                    key=f"cfg_{field['key']}",
+                )
+            else:
+                new_values[field["key"]] = st.text_input(
+                    f"{field['label']}",
+                    value=current,
+                    help=field["help"],
+                    placeholder=field["default"],
+                    key=f"cfg_{field['key']}",
+                )
+
+        col_save, col_reset = st.columns([1, 1])
+
+        with col_save:
+            submitted = st.form_submit_button("💾 儲存全部設定", use_container_width=True)
+
+        with col_reset:
+            reset_all = st.form_submit_button(
+                "🗑️ 清除全部 DB 設定",
+                use_container_width=True,
+                help="刪除資料庫中的所有設定，讓系統回退到 config.toml / 預設值",
+            )
+
+    if submitted:
+        changed = 0
+        for field in LLM_FIELDS:
+            key = field["key"]
+            new_val = new_values[key].strip() if new_values[key] else ""
+            old_val = db_settings.get(key, "")
+            if new_val != old_val:
+                if new_val:
+                    set_setting(key, new_val)
+                    changed += 1
+                else:
+                    delete_setting(key)
+                    changed += 1
+        if changed > 0:
+            st.success(f"✅ 已更新 {changed} 項設定！變更將在下次載入設定時生效。")
+            st.rerun()
+        else:
+            st.info("設定未變更。")
+
+    if reset_all:
+        keys_to_delete = [k for k in db_settings if k.startswith("LEARNING_")]
+        for k in keys_to_delete:
+            delete_setting(k)
+        st.success(f"✅ 已清除 {len(keys_to_delete)} 項 DB 設定，系統將回退到 config.toml / 預設值。")
+        st.rerun()
+
+    # ── 個別刪除按鈕 ─────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 🔧 個別重設")
+
+    db_key_list = [k for k in db_settings if k.startswith("LEARNING_")]
+    if db_key_list:
+        st.caption("以下設定已儲存在資料庫中，點擊刪除可回退到檔案設定值：")
+        cols = st.columns(min(len(db_key_list), 3))
+        for i, key in enumerate(db_key_list):
+            with cols[i % 3]:
+                field_label = key
+                for f in LLM_FIELDS:
+                    if f["key"] == key:
+                        field_label = f["label"]
+                        break
+                if st.button(f"🗑️ {field_label}", key=f"del_{key}", use_container_width=True):
+                    delete_setting(key)
+                    st.success(f"已刪除「{field_label}」的 DB 設定")
+                    st.rerun()
+    else:
+        st.info("目前沒有任何設定儲存在資料庫中，所有設定使用 config.toml / 預設值。")
 
 
 def _export_users_csv() -> str:
