@@ -84,7 +84,7 @@ def load_config() -> dict:
 def call_llm(
     messages: list[dict],
     config: Optional[dict] = None,
-) -> str:
+) -> tuple[str, dict]:
     """呼叫 DeepSeek LLM API（OpenAI 相容介面）
 
     Args:
@@ -92,14 +92,20 @@ def call_llm(
         config: 設定字典（若為 None 則自動載入）
 
     Returns:
-        str: LLM 回覆的文字內容
+        tuple[str, dict]: (LLM 回覆的文字內容, token 用量資訊)
+            token 用量格式：{"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
+            Mock 模式或失敗時回傳空 dict
     """
+    import sys
+
     if config is None:
         config = load_config()
 
     # Mock 模式：回傳模擬資料
     if config.get("LEARNING_DEPLOYMENT", "local") == "local":
-        return _mock_llm_response(messages)
+        mock_text = _mock_llm_response(messages)
+        print("[Token 用量] Mock 模式，無實際 API 呼叫", file=sys.stderr, flush=True)
+        return mock_text, {}
 
     # Cloud 模式：呼叫真實 API
     try:
@@ -117,11 +123,40 @@ def call_llm(
             max_tokens=4096,
         )
 
-        return response.choices[0].message.content
+        # ── 擷取 Token 用量資訊 ──────────────────────────
+        usage_dict = {}
+        if hasattr(response, "usage") and response.usage:
+            usage = response.usage
+            usage_dict = {
+                "prompt_tokens": usage.prompt_tokens or 0,
+                "completion_tokens": usage.completion_tokens or 0,
+                "total_tokens": usage.total_tokens or 0,
+            }
+
+        # ── 後臺日誌：詳細 Token 消耗資訊 ─────────────────
+        model_name = config.get("LEARNING_LLM_MODEL", "unknown")
+        print("=" * 60, file=sys.stderr, flush=True)
+        print("🔢 [Token 消耗詳情]", file=sys.stderr, flush=True)
+        print(f"   模型：{model_name}", file=sys.stderr, flush=True)
+        print(f"   Prompt Tokens：{usage_dict.get('prompt_tokens', 'N/A')}", file=sys.stderr, flush=True)
+        print(f"   Completion Tokens：{usage_dict.get('completion_tokens', 'N/A')}", file=sys.stderr, flush=True)
+        print(f"   Total Tokens：{usage_dict.get('total_tokens', 'N/A')}", file=sys.stderr, flush=True)
+        if usage_dict.get("total_tokens", 0) > 0:
+            # 估算成本（DeepSeek 定價參考，實際以官網為準）
+            prompt_cost = usage_dict.get("prompt_tokens", 0) / 1_000_000 * 1.0  # ~$1/M input
+            completion_cost = usage_dict.get("completion_tokens", 0) / 1_000_000 * 2.0  # ~$2/M output
+            est_cost = prompt_cost + completion_cost
+            print(f"   預估成本：${est_cost:.6f} USD", file=sys.stderr, flush=True)
+        print("=" * 60, file=sys.stderr, flush=True)
+
+        return response.choices[0].message.content, usage_dict
+
     except ImportError:
-        return "⚠️ 請安裝 openai 套件：pip install openai"
+        print("[Token 用量] openai 套件未安裝", file=sys.stderr, flush=True)
+        return "⚠️ 請安裝 openai 套件：pip install openai", {}
     except Exception as e:
-        return f"⚠️ LLM API 呼叫失敗：{str(e)}"
+        print(f"[Token 用量] API 呼叫失敗：{str(e)}", file=sys.stderr, flush=True)
+        return f"⚠️ LLM API 呼叫失敗：{str(e)}", {}
 
 
 def _mock_llm_response(messages: list[dict]) -> str:
@@ -471,7 +506,7 @@ def generate_document(
     use_search: bool = False,
     config: Optional[dict] = None,
     user_prompt_hint: str = "",
-) -> tuple[str, str]:
+) -> tuple[str, str, dict]:
     """生成 worksheet 或 exam 文件
 
     Args:
@@ -484,7 +519,8 @@ def generate_document(
         user_prompt_hint: 使用者自訂的微調提示（原始輸入，會自動 sanitize）
 
     Returns:
-        tuple[str, str]: (markdown 內容, 使用的 LLM 模型名稱)
+        tuple[str, str, dict]: (markdown 內容, 使用的 LLM 模型名稱, token 用量資訊)
+            token 用量格式：{"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
     """
     if config is None:
         config = load_config()
@@ -504,10 +540,10 @@ def generate_document(
     )
 
     # 呼叫 LLM
-    llm_response = call_llm(messages, config)
+    llm_response, token_usage = call_llm(messages, config)
 
     model = config.get("LEARNING_LLM_MODEL", "mock-mode")
-    return llm_response, model
+    return llm_response, model, token_usage
 
 
 # ── DOCX 輸出 ─────────────────────────────────────────────

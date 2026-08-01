@@ -818,7 +818,7 @@ def render_generate_page(user: dict, config: dict) -> None:
             progress_bar.progress(40, "正在呼叫 AI 模型...")
             status_text.info("🤖 正在呼叫 AI 模型生成題目...")
 
-            markdown_content, model_used = generate_document(
+            markdown_content, model_used, token_usage = generate_document(
                 content_text,
                 selected_kid["name"],
                 selected_kid["grade"],
@@ -836,19 +836,21 @@ def render_generate_page(user: dict, config: dict) -> None:
                 markdown_content, generate_type, selected_kid["name"]
             )
 
-            # 記錄使用
-            # 合併選中檔案名稱作為記錄
+            # 記錄使用（含 token 用量）
+            import json as json_lib
             if selected_files_info:
                 record_file_name = " + ".join(
                     u["file_name"] for u in selected_files_info
                 )
             else:
                 record_file_name = st.session_state.get("last_parsed_file_name", "")
+            token_json = json_lib.dumps(token_usage) if token_usage else None
             record_usage(
                 user["id"],
                 generate_type,
                 kid_id=selected_kid["id"],
                 file_name=record_file_name,
+                token_usage=token_json,
             )
 
             progress_bar.progress(100, "完成！")
@@ -874,13 +876,23 @@ def render_generate_page(user: dict, config: dict) -> None:
                 use_container_width=True,
             )
 
-            # 顯示使用的模型
+            # ── Token 用量資訊 ─────────────────────────────
             is_real = is_real_generation(config)
-            st.caption(
-                f"🤖 模型：{model_used} | "
-                f"{'🟢 真實生成' if is_real else '🟡 Mock 模式'} | "
-                f"剩餘配額：{st.session_state['user']['credits']} 次"
-            )
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                st.caption(
+                    f"🤖 模型：{model_used} | "
+                    f"{'🟢 真實生成' if is_real else '🟡 Mock 模式'}"
+                )
+                st.caption(f"💯 剩餘配額：{st.session_state['user']['credits']} 次")
+            with col_info2:
+                if token_usage:
+                    prompt_t = token_usage.get("prompt_tokens", 0)
+                    completion_t = token_usage.get("completion_tokens", 0)
+                    total_t = token_usage.get("total_tokens", 0)
+                    st.caption(f"🔢 Token 用量：{total_t:,}（輸入 {prompt_t:,} + 輸出 {completion_t:,}）")
+                else:
+                    st.caption("🔢 Token 用量：Mock 模式，無實際消耗")
 
             # 提示重新整理配額
             st.info("💡 配額已更新，請查看側邊欄確認剩餘次數。")

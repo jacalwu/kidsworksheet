@@ -90,10 +90,17 @@ def init_db() -> None:
             type TEXT NOT NULL,
             file_name TEXT,
             credits_used INTEGER DEFAULT 1,
+            token_usage TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
+
+    # 為既有資料庫補加 token_usage 欄位（若不存在）
+    try:
+        cursor.execute("ALTER TABLE usage_records ADD COLUMN token_usage TEXT")
+    except Exception:
+        pass  # 欄位已存在
 
     # 應用程式設定（管理員可透過 UI 修改 LLM 參數）
     cursor.execute("""
@@ -409,14 +416,24 @@ def record_usage(
     kid_id: Optional[int] = None,
     file_name: Optional[str] = None,
     credits_used: int = 1,
+    token_usage: Optional[str] = None,
 ) -> int:
-    """記錄一次使用（生成 worksheet/exam），回傳 record_id"""
+    """記錄一次使用（生成 worksheet/exam），回傳 record_id
+
+    Args:
+        user_id: 使用者 ID
+        usage_type: 類型（worksheet / exam）
+        kid_id: Kid ID
+        file_name: 使用的檔案名稱
+        credits_used: 消耗配額
+        token_usage: Token 用量的 JSON 字串（選填）
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO usage_records (user_id, kid_id, type, file_name, credits_used) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (user_id, kid_id, usage_type, file_name, credits_used),
+        "INSERT INTO usage_records (user_id, kid_id, type, file_name, credits_used, token_usage) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, kid_id, usage_type, file_name, credits_used, token_usage),
     )
     conn.commit()
     record_id = cursor.lastrowid

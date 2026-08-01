@@ -160,16 +160,53 @@ def _render_usage_records() -> None:
 
     st.markdown(f"共 {len(filtered)} 筆紀錄（總計 {len(records)} 筆）")
 
+    # ── Token 用量統計 ─────────────────────────────────
+    total_tokens_all = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    records_with_tokens = 0
+    for r in filtered:
+        token_str = r.get("token_usage") or ""
+        if token_str:
+            try:
+                import json as _json
+                tu = _json.loads(token_str)
+                total_tokens_all += tu.get("total_tokens", 0)
+                total_prompt_tokens += tu.get("prompt_tokens", 0)
+                total_completion_tokens += tu.get("completion_tokens", 0)
+                records_with_tokens += 1
+            except Exception:
+                pass
+    if records_with_tokens > 0:
+        st.markdown(
+            f"🔢 **Token 合計**：{total_tokens_all:,}（輸入 {total_prompt_tokens:,} + 輸出 {total_completion_tokens:,}）"
+            f"｜{records_with_tokens} 筆含用量資料"
+        )
+
     # 表格顯示
     if filtered:
         table_data = []
         for r in filtered[:200]:  # 限制顯示 200 筆
+            # 解析 token 用量
+            token_str = r.get("token_usage") or ""
+            token_display = "-"
+            if token_str:
+                try:
+                    import json as _json
+                    tu = _json.loads(token_str)
+                    total = tu.get("total_tokens", 0)
+                    if total > 0:
+                        token_display = f"{total:,}"
+                except Exception:
+                    pass
+
             table_data.append({
                 "ID": r["id"],
                 "使用者": r["username"],
                 "類型": "📝 練習題" if r["type"] == "worksheet" else "📋 考試卷",
                 "檔案": r["file_name"] or "-",
                 "扣點": r["credits_used"],
+                "Token": token_display,
                 "時間": r["created_at"][:19] if r["created_at"] else "-",
             })
 
@@ -648,16 +685,29 @@ def _export_usage_csv() -> str:
     # 標題列
     writer.writerow([
         "紀錄 ID", "使用者名稱", "類型", "檔案名稱",
-        "扣點數", "時間",
+        "扣點數", "Prompt Tokens", "Completion Tokens", "Total Tokens", "時間",
     ])
 
     for r in records:
+        # 解析 token 用量
+        pt = ct = tt = ""
+        token_str = r.get("token_usage") or ""
+        if token_str:
+            try:
+                import json as _json
+                tu = _json.loads(token_str)
+                pt = tu.get("prompt_tokens", "")
+                ct = tu.get("completion_tokens", "")
+                tt = tu.get("total_tokens", "")
+            except Exception:
+                pass
         writer.writerow([
             r["id"],
             r["username"],
             r["type"],
             r.get("file_name", ""),
             r["credits_used"],
+            pt, ct, tt,
             r["created_at"],
         ])
 
